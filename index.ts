@@ -1,10 +1,19 @@
-import { Client, GatewayIntentBits, EmbedBuilder, TextChannel } from 'discord.js';
-import { existsSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+    Client,
+    EmbedBuilder,
+    Events,
+    GatewayIntentBits,
+    type TextChannel,
+} from 'discord.js';
 import Redis from 'ioredis';
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const CHANNEL_ID = process.env.DISCORD_CHANNEL_ID;
-const APP_IDS = process.env.STEAM_APP_IDS?.split(',').map(id => id.trim()).filter(id => id.length > 0) || [];
+const APP_IDS =
+    process.env.STEAM_APP_IDS?.split(',')
+        .map((id) => id.trim())
+        .filter((id) => id.length > 0) || [];
 const CHECK_INTERVAL = parseInt(process.env.CHECK_INTERVAL_MS || '300000', 10);
 const REDIS_URL = process.env.REDIS_URL;
 const STORAGE_FILE = 'storage.json';
@@ -22,9 +31,11 @@ interface SteamEvent {
     event_type: number;
     appid: number;
     rtime32_start_time: number;
+    clan_steamid?: string;
     announcement_body: {
         body: string;
         tags: string[];
+        clanid?: string;
     };
     jsondata?: string;
 }
@@ -35,7 +46,7 @@ interface SteamApiResponse {
 }
 
 const client = new Client({
-    intents: [GatewayIntentBits.Guilds]
+    intents: [GatewayIntentBits.Guilds],
 });
 
 async function getLastGid(appId: string): Promise<string | null> {
@@ -71,25 +82,42 @@ async function setLastGid(appId: string, gid: string) {
 
 function formatSteamText(text: string): string {
     let formatted = text
-        .replace(/[\[]h1[\]](.*?)[\[]h1[\]]/g, '# $1\n')
-        .replace(/[\[]h2[\]](.*?)[\[]h2[\]]/g, '## $1\n')
-        .replace(/[\[]h3[\]](.*?)[\[]h3[\]]/g, '### $1\n')
-        .replace(/[\[]b[\]](.*?)[\[]b[\]]/g, '**$1**')
-        .replace(/[\[]i[\]](.*?)[\[]i[\]]/g, '*$1*')
-        .replace(/[\[]u[\]](.*?)[\[]u[\]]/g, '__$1__')
-        .replace(/[\[]strike[\]](.*?)[\[]strike[\]]/g, '~~$1~~')
-        .replace(/[\[]url=(.*?)[\]](.*?)[\[]url[\]]/g, '[$2]($1)')
-        .replace(/[\[]list[\]]/g, '')
-        .replace(/[\[]list[\]]/g, '')
-        .replace(/[\[]\*[\]]/g, '• ')
-        .replace(/[\[]spoiler[\]](.*?)[\[]spoiler[\]]/g, '||$1||')
-        .replace(/[\[]code[\]](.*?)[\[]code[\]]/g, '```\n$1\n```')
-        .replace(/[\[]quote[\]](.*?)[\[]quote[\]]/g, '> $1\n')
-        .replace(/[\[]img[\]](.*?)[\[]img[\]]/g, 'Image: $1')
-        .replace(/[\[]\/?p[\]]/g, '\n');
+        // Headers
+        .replace(/\[h1\](.*?)\[\/h1\]/gs, '# $1\n')
+        .replace(/\[h2\](.*?)\[\/h2\]/gs, '## $1\n')
+        .replace(/\[h3\](.*?)\[\/h3\]/gs, '### $1\n')
+        // Text formatting
+        .replace(/\[b\](.*?)\[\/b\]/gs, '**$1**')
+        .replace(/\[i\](.*?)\[\/i\]/gs, '*$1*')
+        .replace(/\[u\](.*?)\[\/u\]/gs, '__$1__')
+        .replace(/\[strike\](.*?)\[\/strike\]/gs, '~~$1~~')
+        // Links
+        .replace(/\[url=["']?(.*?)["']?\](.*?)\[\/url\]/gs, '[$2]($1)')
+        // Lists
+        .replace(/\[list\]/gi, '')
+        .replace(/\[\/list\]/gi, '')
+        .replace(/\[\*\]/g, '• ')
+        .replace(/\[\/\*\]/g, '')
+        .replace(/\[\/\]/g, '') // Malformed closing tags
+        // Spoilers
+        .replace(/\[spoiler\](.*?)\[\/spoiler\]/gs, '||$1||')
+        // Code
+        .replace(/\[code\](.*?)\[\/code\]/gs, '```\n$1\n```')
+        // Quotes
+        .replace(/\[quote\](.*?)\[\/quote\]/gs, '> $1\n')
+        // Images - extract URL only
+        .replace(/\[img\](.*?)\[\/img\]/gs, '')
+        // Paragraphs
+        .replace(/\[\/p\]/gi, '\n')
+        .replace(/\[p\]/gi, '')
+        // Preformatted text
+        .replace(/\[previewyoutube=.*?\]\[\/previewyoutube\]/gs, '')
+        // Clean up multiple newlines
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
 
     if (formatted.length > 3500) {
-        formatted = formatted.substring(0, 3500) + '...\n\n[Read full patch notes on Steam]';
+        formatted = `${formatted.substring(0, 3500)}...\n\n[Read full patch notes on Steam]`;
     }
 
     return formatted;
@@ -100,10 +128,10 @@ async function checkUpdates() {
         try {
             const url = `https://store.steampowered.com/events/ajaxgetadjacentpartnerevents/?appid=${appId}&count_before=0&count_after=1`;
             const response = await fetch(url);
-            const data = await response.json() as SteamApiResponse;
+            const data = (await response.json()) as SteamApiResponse;
 
-            if (data.success === 1 && data.events.length > 0) {
-                const event = data.events[0];
+            const event = data.events[0];
+            if (data.success === 1 && event) {
                 const lastGid = await getLastGid(appId);
 
                 if (event.gid !== lastGid) {
@@ -120,23 +148,36 @@ async function checkUpdates() {
 async function sendDiscordNotification(event: SteamEvent) {
     if (!CHANNEL_ID) return;
 
-    const channel = await client.channels.fetch(CHANNEL_ID) as TextChannel;
+    const channel = (await client.channels.fetch(CHANNEL_ID)) as TextChannel;
     if (!channel) return;
 
     let imageUrl: string | null = null;
+    const clanId = event.announcement_body.clanid;
+    
     try {
-        if (event.jsondata) {
+        if (event.jsondata && clanId) {
             const jsonData = JSON.parse(event.jsondata);
-            const images = jsonData.localized_title_image;
-            if (Array.isArray(images) && images[0]) {
-                 imageUrl = `https://cdn.akamai.steamstatic.com/steamcommunity/public/images/clans/${event.clan_steamid}/${images[0]}`;
+            const titleImages = jsonData.localized_title_image;
+            const capsuleImages = jsonData.localized_capsule_image;
+            
+            // Try title_image first, then capsule_image
+            const imageFile =
+                (Array.isArray(titleImages) && titleImages[0]) ||
+                (Array.isArray(capsuleImages) && capsuleImages[0]);
+            
+            if (imageFile) {
+                imageUrl = `https://clan.fastly.steamstatic.com/images/${clanId}/${imageFile}`;
             }
         }
-    } catch {}
+    } catch {
+        // JSON parsing failed, skip image
+    }
 
     const embed = new EmbedBuilder()
         .setTitle(event.event_name)
-        .setURL(`https://store.steampowered.com/news/app/${event.appid}/view/${event.gid}`)
+        .setURL(
+            `https://store.steampowered.com/news/app/${event.appid}/view/${event.gid}`,
+        )
         .setDescription(formatSteamText(event.announcement_body.body))
         .setColor(0x1b2838)
         .setTimestamp(new Date(event.rtime32_start_time * 1000))
@@ -149,7 +190,7 @@ async function sendDiscordNotification(event: SteamEvent) {
     await channel.send({ embeds: [embed] });
 }
 
-client.once('ready', () => {
+client.once(Events.ClientReady, () => {
     console.log(`Logged in as ${client.user?.tag}`);
     checkUpdates();
     setInterval(checkUpdates, CHECK_INTERVAL);

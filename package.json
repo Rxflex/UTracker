@@ -1,19 +1,23 @@
 {
-  "name": "gwatcher",
-  "module": "index.ts",
-  "type": "module",
-  "private": true,
-  "scripts": {
-    "start": "bun index.ts"
-  },
-  "devDependencies": {
-    "@types/bun": "latest"
-  },
-  "peerDependencies": {
-    "typescript": "^5"
-  },
-  "dependencies": {
-    "discord.js": "^14.25.1",
-    "ioredis": "^5.8.2"
-  }
+    "name": "gwatcher",
+    "module": "index.ts",
+    "type": "module",
+    "private": true,
+    "scripts": {
+        "start": "bun index.ts",
+        "lint": "biome lint .",
+        "format": "biome format --write .",
+        "check": "biome check --write ."
+    },
+    "devDependencies": {
+        "@biomejs/biome": "2.3.10",
+        "@types/bun": "latest"
+    },
+    "peerDependencies": {
+        "typescript": "^5"
+    },
+    "dependencies": {
+        "discord.js": "^14.25.1",
+        "ioredis": "^5.8.2"
+    }
 }
